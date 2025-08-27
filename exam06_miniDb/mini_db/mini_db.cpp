@@ -3,6 +3,7 @@
 #include <map>
 #include <fstream>
 #include <signal.h>
+#include <cstdlib> // ADDED: per atoi()
 
 
 std::string path;
@@ -47,3 +48,4 @@ int main(int ac, char **av)
 	server.run();
 	return 0;
 }
+
