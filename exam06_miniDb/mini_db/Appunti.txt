@@ -1,2 +1,0 @@
-sembra che questa versione di mini db funzioni, eccetto che per un particolare, 
-deve essere non blocking, funzionalità attualkmente non presente
