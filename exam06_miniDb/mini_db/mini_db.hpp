@@ -6,8 +6,7 @@
 #include <unistd.h>
 #include <map>
 #include <sstream>
-#include <sys/select.h>  // ADDED: per select() non-blocking
-#include <fcntl.h>       // ADDED: per fcntl() O_NONBLOCK
+#include <sys/select.h>  // Aggiunto per select()
 
 
 //copy all the main.c in the subject
@@ -21,21 +20,17 @@ public:
 	Socket(int port) :
 			_sockfd(socket(AF_INET, SOCK_STREAM, 0))
 		{
-			if(_sockfd == -1){
+			if(_sockfd == -1)
+			{
 				throw std::runtime_error("Socket creation failed");
-			}
-
-			// ADDED: Imposta socket come non-blocking
-			if (fcntl(_sockfd, F_SETFL, O_NONBLOCK) < 0) {
-				throw std::runtime_error("Failed to set socket non-blocking");
 			}
 
 			memset(&_servaddr, 0, sizeof(_servaddr));
 			_servaddr.sin_family = AF_INET;
-			_servaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // FIXED: 127.0.0.1 specifico
+			_servaddr.sin_addr.s_addr = 0x0100007F;
 			_servaddr.sin_port = htons(port);
 		}
-//
+
 	~Socket()
 		{
 			if (_sockfd != -1)
@@ -61,47 +56,52 @@ public:
 			int clientSocketFd = ::accept(_sockfd, (struct sockaddr*)&clientAddr, &clientLen);
 			if(clientSocketFd < 0)
 			{
-				return -1; // FIXED: Non-blocking - ritorna -1 invece di eccezione
+				throw std::runtime_error("Failed to accept connection");
 			}
-
-			// ADDED: Imposta anche client socket come non-blocking
-			if (fcntl(clientSocketFd, F_SETFL, O_NONBLOCK) < 0) {
-				close(clientSocketFd);
-				return -1;
-			}
-
 			return clientSocketFd;
 		}
-
-	// ADDED: Getter per ottenere socket fd per select()
-	int getSocketFd() const { return _sockfd; }
+		//il vero pull messages
+		std::string pullMessage(int clientFd)
+		{
+			char buf[1024];
+			int byte_read = recv(clientFd, buf, 1000, 0);
+			if(byte_read <= 0)
+				return std::string("");
+			buf[byte_read] = '\0';
+			std::string msg(buf);
+			return msg;
+		}
+		
+		// Getter per ottenere fd
+		int getSocketFd() const
+		{
+			return _sockfd;
+		}
 };
 
+//ggiunto db
 class Server
 {
 private: 
 	Socket _listeningSocket;
-	std::map<std::string, std::string> &db;
-	std::map<int, std::string> clientBuffers; // ADDED: Buffer per messaggi parziali
-	fd_set readfds, activefds; // ADDED: Set per select()
-	int maxfd; // ADDED: Massimo FD per select()
-//
+	std::map<std::string, std::string> &db; //database
 public:
+	//construct
 	Server(int port, std::map<std::string, std::string>&database) :
-		_listeningSocket(port), db(database), maxfd(0)
+		_listeningSocket(port), db(database)
 		{
-			FD_ZERO(&activefds); // ADDED: Inizializza set FD
+
 		}
-	//add handler function
-	void handlemessage(int clientFd, const std::string& message){
+	//add handler function (diverso da main)
+	void handlemessage(int clientFd, std::string message){
 		std::istringstream msg(message);
 		std::string command, key, value;
 		msg >> command >> key >> value;
-		if(command == "POST" && !key.empty() && !value.empty()){ // FIXED: Added !key.empty() check
+		if(command == "POST" && !value.empty()){
 			db[key] = value;
 			send(clientFd, "0\n", 2, 0);
 		}
-		else if(command == "GET" && !key.empty() && value.empty()){ // FIXED: Added !key.empty() check
+		else if(command == "GET" && value.empty()){
 			auto it = db.find(key);
 			if(it != db.end()){
 				std::string ret = "0 " + it->second + '\n';
@@ -110,7 +110,7 @@ public:
 			else
 				send(clientFd, "1\n", 2 ,0);
 
-		}else if(command == "DELETE" && !key.empty() && value.empty()){ // FIXED: Added !key.empty() check
+		}else if(command == "DELETE" && value.empty()){
 			auto it = db.find(key);
 			if(it != db.end()){
 				db.erase(it);
@@ -122,89 +122,79 @@ public:
 			send(clientFd, "2\n", 2, 0);
 		}
 	}
-
-	// ADDED: Gestisce nuovo client
-	void handleNewClient() {
-		struct sockaddr_in clientAddr;
-		int clientFd = _listeningSocket.accept(clientAddr);
-		
-		if (clientFd < 0) {
-			return; // Non-blocking: nessun client in attesa
-		}
-
-		// Aggiungi al set attivo
-		FD_SET(clientFd, &activefds);
-		if (clientFd > maxfd) maxfd = clientFd;
-		
-		// Inizializza buffer per questo client
-		clientBuffers[clientFd] = "";
-	}
-
-	// ADDED: Gestisce messaggio da client
-	void handleClientMessage(int clientFd) {
-		char buf[1024];
-		int bytes_read = recv(clientFd, buf, 1000, 0);
-		
-		if (bytes_read <= 0) {
-			// Client disconnesso
-			FD_CLR(clientFd, &activefds);
-			close(clientFd);
-			clientBuffers.erase(clientFd);
-			return;
-		}
-		
-		buf[bytes_read] = '\0';
-		clientBuffers[clientFd] += std::string(buf);
-		
-		// Processa messaggi completi (terminati da \n)
-		processCompleteMessages(clientFd);
-	}
-
-	// ADDED: Processa messaggi completi
-	void processCompleteMessages(int clientFd) {
-		std::string& buffer = clientBuffers[clientFd];
-		size_t pos = 0;
-		
-		while((pos = buffer.find('\n')) != std::string::npos) {
-			std::string message = buffer.substr(0, pos);
-			buffer.erase(0, pos + 1); // Rimuovi messaggio processato
-			
-			if(!message.empty()) {
-				handlemessage(clientFd, message);
-			}
-		}
-	}
 	int run()
 		{
 			try
 			{
 				_listeningSocket.bindAndListen();
+				
 				std::cout << "ready" << std::endl;
-				
-				// ADDED: Setup select() - aggiungi server socket al set
-				int serverfd = _listeningSocket.getSocketFd();
-				FD_SET(serverfd, &activefds);
-				maxfd = serverfd;
-				
-				while(true) {
-					readfds = activefds; // Copia set attivo
+
+				  // Variabili per select()
+        		fd_set readfds, writefds, active;
+        		int fdMax = 0;
+        		std::map<int, std::string> clientBuffers; // Buffer per messaggi parziali
+
+				  // Inizializza set FD
+       			 FD_ZERO(&active);
+       			 int serverFd = _listeningSocket.getSocketFd();
+        		FD_SET(serverFd, &active);
+        		fdMax = serverFd;
+				while(true)
+				{
+					//  select()
+           			 readfds = writefds = active;
+            		if (select(fdMax + 1, &readfds, &writefds, NULL, NULL) < 0)
+             		   continue;
 					
-					// ADDED: SELECT NON-BLOCKING - aspetta attività su qualsiasi FD
-					if(select(maxfd + 1, &readfds, NULL, NULL, NULL) < 0) {
-						std::cerr << "Select error" << std::endl;
-						continue;
-					}
-					
-					// ADDED: Controlla tutti i file descriptor per attività
-					for(int fd = 0; fd <= maxfd; fd++) {
-						if(!FD_ISSET(fd, &readfds)) continue;
+					// controlla ogni fd per vedere se è pronto
+					for(int fd = 0; fd <= fdMax; fd++) 
+					{
+						if(!FD_ISSET(fd, &readfds)) continue; // Skip fd non pronti
 						
-						if(fd == serverfd) {
-							// ADDED: Nuovo client
-							handleNewClient();
-						} else {
-							// ADDED: Messaggio da client esistente
-							handleClientMessage(fd);
+						if(fd == serverFd)
+						{
+							// se fd pronto nuovo client in arrivo
+							sockaddr_in clientAddr;
+							try {
+								int clientFd = _listeningSocket.accept(clientAddr);
+								// nuovo client al set
+								FD_SET(clientFd, &active);
+								if(clientFd > fdMax) fdMax = clientFd;
+								clientBuffers[clientFd] = "";
+							}
+							catch(const std::exception& e)
+							{
+								// ignora errori di accept
+							}
+						}
+						else 
+						{
+
+							char buf[1024];
+							int bytes = recv(fd, buf, 1000, 0);
+							if(bytes <= 0) {
+								// Client disconnesso
+								FD_CLR(fd, &active);
+								close(fd);
+								clientBuffers.erase(fd);
+							}
+							else
+							{
+								buf[bytes] = '\0';
+								clientBuffers[fd] += buf;
+								
+								// Processa messaggi completi (terminati con \n)
+								size_t pos;
+								while((pos = clientBuffers[fd].find('\n')) != std::string::npos) {
+									std::string message = clientBuffers[fd].substr(0, pos);
+									clientBuffers[fd].erase(0, pos + 1);
+									if(!message.empty())
+									{
+										handlemessage(fd, message);
+									}
+								}
+							}
 						}
 					}
 				}
