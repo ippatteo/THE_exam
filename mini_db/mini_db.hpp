@@ -6,28 +6,26 @@
 #include <unistd.h>
 #include <map>
 #include <sstream>
-#include <sys/select.h>  // Aggiunto per select()
 
 
 //copy all the main.c in the subject
 class Socket
 {
 private:
-	int _sockfd;
-	struct sockaddr_in _servaddr;
+struct sockaddr_in _servaddr;
 
 public:
+	int _sockfd;
 	Socket(int port) :
 			_sockfd(socket(AF_INET, SOCK_STREAM, 0))
 		{
-			if(_sockfd == -1)
-			{
+			if(_sockfd == -1){
 				throw std::runtime_error("Socket creation failed");
 			}
 
 			memset(&_servaddr, 0, sizeof(_servaddr));
 			_servaddr.sin_family = AF_INET;
-			_servaddr.sin_addr.s_addr = 0x0100007F;
+			_servaddr.sin_addr.s_addr = htonl(INADDR_ANY);
 			_servaddr.sin_port = htons(port);
 		}
 
@@ -60,7 +58,7 @@ public:
 			}
 			return clientSocketFd;
 		}
-		//il vero pull messages
+		//change pull message to retrive the message add int clientFd as param
 		std::string pullMessage(int clientFd)
 		{
 			char buf[1024];
@@ -71,28 +69,23 @@ public:
 			std::string msg(buf);
 			return msg;
 		}
-		
-		// Getter per ottenere fd
-		int getSocketFd() const
-		{
-			return _sockfd;
-		}
 };
 
-//ggiunto db
+//ad ad db reference to constructor
 class Server
 {
 private: 
 	Socket _listeningSocket;
-	std::map<std::string, std::string> &db; //database
+	std::map<std::string, std::string> &db;
+	fd_set rfds, wfds, afds;
+	int max_fd = 0;
 public:
-	//construct
 	Server(int port, std::map<std::string, std::string>&database) :
 		_listeningSocket(port), db(database)
 		{
-
+			FD_ZERO(&afds);
 		}
-	//add handler function (diverso da main)
+	//add handler function
 	void handlemessage(int clientFd, std::string message){
 		std::istringstream msg(message);
 		std::string command, key, value;
@@ -127,74 +120,32 @@ public:
 			try
 			{
 				_listeningSocket.bindAndListen();
-				
+				max_fd = _listeningSocket._sockfd; 
+				FD_SET(max_fd, &afds);
 				std::cout << "ready" << std::endl;
-
-				  // Variabili per select()
-        		fd_set readfds, writefds, active;
-        		int fdMax = 0;
-        		std::map<int, std::string> clientBuffers; // Buffer per messaggi parziali
-
-				  // Inizializza set FD
-       			 FD_ZERO(&active);
-       			 int serverFd = _listeningSocket.getSocketFd();
-        		FD_SET(serverFd, &active);
-        		fdMax = serverFd;
-				while(true)
-				{
-					//  select()
-           			 readfds = writefds = active;
-            		if (select(fdMax + 1, &readfds, &writefds, NULL, NULL) < 0)
-             		   continue;
-					
-					// controlla ogni fd per vedere se è pronto
-					for(int fd = 0; fd <= fdMax; fd++) 
-					{
-						if(!FD_ISSET(fd, &readfds)) continue; // Skip fd non pronti
-						
-						if(fd == serverFd)
-						{
-							// se fd pronto nuovo client in arrivo
-							sockaddr_in clientAddr;
-							try {
-								int clientFd = _listeningSocket.accept(clientAddr);
-								// nuovo client al set
-								FD_SET(clientFd, &active);
-								if(clientFd > fdMax) fdMax = clientFd;
-								clientBuffers[clientFd] = "";
-							}
-							catch(const std::exception& e)
-							{
-								// ignora errori di accept
-							}
+				while(true){
+					std::cout << "AAAAAAAAAAAAAA" << std::endl;
+					sockaddr_in clientAddr;
+					rfds = wfds = afds;
+					if (select(max_fd + 1, &rfds, &wfds, NULL, NULL) < 0)
+						throw std::runtime_error("error in select");
+					for (int fd = 0; fd <= max_fd; fd++){
+						std::cout << "BBBBBBBB" << std::endl;
+						if (!FD_ISSET(fd, &rfds))
+							continue;
+						if (fd == _listeningSocket._sockfd){
+							int clientFd = _listeningSocket.accept(clientAddr);
+							FD_SET(clientFd, &afds);
+							max_fd = clientFd > max_fd ? clientFd : max_fd;
 						}
-						else 
-						{
-
-							char buf[1024];
-							int bytes = recv(fd, buf, 1000, 0);
-							if(bytes <= 0) {
-								// Client disconnesso
-								FD_CLR(fd, &active);
+						else{
+							std::string message = _listeningSocket.pullMessage(fd);
+							if(message.empty()){
 								close(fd);
-								clientBuffers.erase(fd);
+								FD_CLR(fd, &afds);
+								break;
 							}
-							else
-							{
-								buf[bytes] = '\0';
-								clientBuffers[fd] += buf;
-								
-								// Processa messaggi completi (terminati con \n)
-								size_t pos;
-								while((pos = clientBuffers[fd].find('\n')) != std::string::npos) {
-									std::string message = clientBuffers[fd].substr(0, pos);
-									clientBuffers[fd].erase(0, pos + 1);
-									if(!message.empty())
-									{
-										handlemessage(fd, message);
-									}
-								}
-							}
+							handlemessage(fd, message);
 						}
 					}
 				}
