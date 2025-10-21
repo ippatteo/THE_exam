@@ -59,6 +59,7 @@ int main(int ac, char **av) {
             continue;
         for(int fdI = 0; fdI <= fdMax; fdI++) {
             if (FD_ISSET(fdI, &readfds) && fdI == sockfd) {
+				len = sizeof(servaddr);
                 int connfd = accept(sockfd, (struct sockaddr *)&servaddr, &len);
                 if (connfd < 0)
                     continue;
